@@ -4,12 +4,7 @@
 Raspberry Pi Pico / RP2040. Генерирует на двух соседних GPIO два меандра  
 одной частоты со сдвигом фазы 90° (I/Q) — для питания SDR-смесителей  
 (Tayloe, QSD/QSE, фазовых детекторов).  
-  
-Портирована из модуля `soft_rx` проекта  
-[RP2040_radiomodem](https://github.com/ru0aog/RP2040_radiomodem)  
-(GPLv3, RU0AOG). В отличие от оригинала, не зависит от менеджера `vfo`,  
-`pins.h`, `soft_tx` и другой периферии проекта: PIO-блок, state machine,  
-пины, PLL-лимиты и промежуточная частота — всё задаётся параметрами.  
+
   
 ## Возможности  
   
@@ -35,23 +30,11 @@ Raspberry Pi Pico / RP2040. Генерирует на двух соседних 
   зависимостей.  
   
 ## Установка  
-  Скопируйте каталог `quad_vfo/` в `libraries/` вашего Arduino-окружения  
+
+Скопируйте каталог `quad_vfo/` в `libraries/` вашего Arduino-окружения  
 (ядро [arduino-pico](https://github.com/earlephilhower/arduino-pico))  
 или в `lib/` проекта PlatformIO.
-libraries/quad_vfo/
-├── library.properties
-├── src/
-│ ├── quad_vfo.h — публичный API и quad_vfo_cfg_t
-│ ├── quad_vfo.cpp — PIO-программа, сканер, start/stop/debug
-│ ├── quad_vfo_pll.h — quad_vfo_pll_t, set_clk_sys, vsel_for
-│ └── quad_vfo_pll.cpp — безопасная перепрошивка pll_sys + vreg
-└── examples/
-├── quad_vfo_demo/ — минимальный запуск (pio1, GP0/GP1)
-└── quad_vfo_demo_cfg/ — полная конфигурация (свой PIO/SM/лимиты)
 
-Требования: ядро arduino-pico (Pico SDK: `hardware/pio`, `hardware/clocks`,  
-`hardware/pll`, `hardware/vreg`, `hardware/sync`).  
-  
 ## Быстрый старт  
   
 ```cpp  
@@ -68,6 +51,23 @@ void setup() {
 }  
   
 void loop() {}
+```
+
+## Структура библиотеки
+
+libraries/quad_vfo/
+├── library.properties
+├── src/
+│ ├── quad_vfo.h — публичный API и quad_vfo_cfg_t
+│ ├── quad_vfo.cpp — PIO-программа, сканер, start/stop/debug
+│ ├── quad_vfo_pll.h — quad_vfo_pll_t, set_clk_sys, vsel_for
+│ └── quad_vfo_pll.cpp — безопасная перепрошивка pll_sys + vreg
+└── examples/
+├── quad_vfo_demo/ — минимальный запуск (pio1, GP0/GP1)
+└── quad_vfo_demo_cfg/ — полная конфигурация (свой PIO/SM/лимиты)
+
+Требования: ядро arduino-pico (Pico SDK: `hardware/pio`, `hardware/clocks`,  
+`hardware/pll`, `hardware/vreg`, `hardware/sync`). 
 
 API
 Функция	Назначение
