@@ -31,8 +31,7 @@ Raspberry Pi Pico / RP2040. Генерирует на двух соседних 
   
 ## Установка  
 
-Скопируйте каталог `quad_vfo/` в `libraries/` вашего Arduino-окружения  
-(ядро [arduino-pico](https://github.com/earlephilhower/arduino-pico))  
+Скопируйте каталог `quad_vfo/` в `libraries/` вашего Arduino-окружения (ядро [arduino-pico](https://github.com/earlephilhower/arduino-pico))
 или в `lib/` проекта PlatformIO.
 
 ## Быстрый старт  
