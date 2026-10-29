@@ -11,12 +11,14 @@
 // реальной clock_get_hz(clk_sys).  
 //  
 // Режим точной частоты (nco_max_hz == 0): LO = freq, все NCO-зоны  
-// выключены, сканер выбирает делитель по минимуму |f_nco|.  
+// выключены, сканер выбирает делитель по минимуму |f_nco|, допуск при  
+// пересчёте — половина шага между соседними Q8-делителями.  
 //  
 // Жизненный цикл: offset программы хранится per-PIO; повторный init  
-// транзакционен — валидация и проверка доступности SM до освобождения  
-// прежних ресурсов. Отказы после "точки невозврата" приводят состояние  
-// в согласованный вид через fail_path().  
+// транзакционен — валидация, проверка доступности SM и памяти PIO  
+// выполняются ДО освобождения прежних ресурсов; новая SM захватывается  
+// до остановки старой. Отказы после "точки невозврата" приводят  
+// состояние в согласованный вид через fail_path().  
 // ============================================================================  
 #include "quad_vfo.h"  
 #include "hardware/pio.h"  
@@ -31,10 +33,9 @@
 // Нижняя граница VCO в сканере: 750 МГц — рабочее окно исходника  
 // (не аппаратный предел), оставлено как было в soft_rx.  
   
-// Допустимая |f_nco| в режиме точной частоты при пересчёте делителя  
-// после отката шины (recompute_div): физически ошибка ограничена  
-// дискретностью делителя, 1 МГц — широкий задел.  
-#define QUAD_EXACT_MODE_TOL_HZ 1000000  
+// В режиме без ПЧ-сдвига допустимая ошибка определяется разрешением  
+// делителя PIO Q8: примерно половина шага между соседними значениями.  
+// Фиксированный допуск в 1 МГц мог скрывать значительную ошибку LO.  
   
 // ---------------------------------------------------------------------------  
 // PIO-программа квадратурного LO: 4 инструкции, set pins n.  
@@ -64,39 +65,14 @@ static uint32_t s_lo_actual_hz = 0;
 static int32_t  s_lo_error_mhz = 0;  
   
 // Программа загружается в каждый PIO-блок отдельно.  
-static int      s_offset[2]   = { -1, -1 };   // по индексу pio_get_index()  
-static unsigned s_cur_offset  = 0;  
-  
-// ---------------------------------------------------------------------------  
-void quad_vfo_default_cfg(quad_vfo_cfg_t *cfg) {  
-  memset(cfg, 0, sizeof(*cfg));  
-  cfg->pio   = pio1;  
-  cfg->sm    = -1;  
-  cfg->pin_i = 0;  
-  // PLL-подсистема  
-  cfg->pll_nominal = { 133, 6, 2, 133000000u,  
-                       (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };  
-  cfg->pll_ceiling = { 95, 3, 1, 380000000u,  
-                       (uint32_t)VREG_VOLTAGE_1_30, true, 1 };  
-  cfg->xosc_hz           = 12000000ULL;  
-  cfg->clk_sys_min_hz    = 240000000ULL;  
-  cfg->clk_sys_max_hz    = 420000000ULL;  
-  cfg->pll_vco_max_hz    = QUAD_VCO_HW_MAX_HZ;  
-  cfg->clk_sys_nominal_hz= 133000000ULL;  
-  // ПЧ и NCO-зоны (режим приёмника, как в soft_rx)  
-  cfg->if_shift_hz    = 11000u;  
-  cfg->nco_max_hz     = 62500u;  
-  cfg->nco_sweet_lo   = 9600u;  
-  cfg->nco_sweet_hi   = 14500u;  
-  cfg->nco_forbid_lo  = 0u;  
-  cfg->nco_forbid_hi  = 5000u;  
-}  
+static int      s_offset[2]    = { -1, -1 };  // по индексу pio_get_index()  
+static unsigned s_cur_offset   = 0;  
   
 // ---------------------------------------------------------------------------  
 static bool pio_ok(PIO p) { return p == pio0 || p == pio1; }  
   
-// Аппаратные ограничения профиля: делители в диапазонах SDK,  
-// clk_sys_hz != 0, VCO в аппаратном окне 400..1600 МГц.  
+// Базовая валидность профиля: делители в диапазонах, clk_sys_hz != 0,  
+// VCO в аппаратном окне 400..1600 МГц (по переданному xosc).  
 static bool pll_profile_ok(const quad_vfo_pll_t *p, uint64_t xosc_hz) {  
   if (p->refdiv < 1 || p->refdiv > 63)              return false;  
   if (p->p1 < 2 || p->p1 > 7)                       return false;  
@@ -109,16 +85,21 @@ static bool pll_profile_ok(const quad_vfo_pll_t *p, uint64_t xosc_hz) {
   return true;  
 }  
   
-// Согласованность полей: вычисленная частота == clk_sys_hz (±1%).  
-static bool pll_profile_consistent(const quad_vfo_pll_t *p, uint64_t xosc_hz) {  
-  uint64_t calc = ((xosc_hz / p->refdiv) * p->fbdiv) / (p->p1 * p->p2);  
-  uint64_t diff = (calc > p->clk_sys_hz)  
-                  ? calc - p->clk_sys_hz : p->clk_sys_hz - calc;  
-  return diff <= p->clk_sys_hz / 100u;  
+// Согласованность полей: fbdiv*xosc/(refdiv*p1*p2) должна давать  
+// clk_sys_hz в пределах 1% (допуск на округление pll_init).  
+static bool pll_profile_consistent(const quad_vfo_pll_t *p,  
+                                   uint64_t xosc_hz) {  
+  uint64_t denom = (uint64_t)p->refdiv * p->p1 * p->p2;  
+  if (denom == 0) return false;  
+  uint64_t calc = ((uint64_t)p->fbdiv * xosc_hz) / denom;  
+  uint64_t diff = (calc > p->clk_sys_hz) ? (calc - p->clk_sys_hz)  
+                                         : (p->clk_sys_hz - calc);  
+  return diff <= p->clk_sys_hz / 100;  
 }  
   
-// Единый путь отказа после "точки невозврата" (SM уже погашена):  
-// состояние приводится к согласованному виду, пины в input.  
+// ---------------------------------------------------------------------------  
+// Единый путь отказа после "точки невозврата" (SM уже остановлена):  
+// генератор в согласованное состояние "остановлен".  
 static void fail_path(void) {  
   pio_sm_set_enabled(s_cfg.pio, s_sm, false);  
   pio_sm_set_consecutive_pindirs(s_cfg.pio, s_sm, s_cfg.pin_i, 2, false);  
@@ -127,6 +108,36 @@ static void fail_path(void) {
   s_active       = false;  
   s_lo_actual_hz = 0;  
   s_lo_error_mhz = 0;  
+}  
+  
+// ---------------------------------------------------------------------------  
+void quad_vfo_default_cfg(quad_vfo_cfg_t *cfg) {  
+  if (!cfg) return;  
+  memset(cfg, 0, sizeof(*cfg));  
+  
+  cfg->pio   = pio1;  
+  cfg->sm    = -1;  
+  cfg->pin_i = 0;                    // I=GP0, Q=GP1 как в исходнике  
+  
+  // PLL-профили (значения pll_nominal/pll_ceiling исходника).  
+  cfg->pll_nominal = { 133, 6, 2, 133000000u,  
+                       (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };  
+  cfg->pll_ceiling = { 95, 3, 1, 380000000u,  
+                       (uint32_t)VREG_VOLTAGE_1_30, true, 1 };  
+  
+  cfg->xosc_hz            = 12000000ULL;  
+  cfg->clk_sys_min_hz     = 240000000ULL;  
+  cfg->clk_sys_max_hz     = 133000000ULL;   // "не доказано" -> pll_ceiling  
+  cfg->pll_vco_max_hz     = QUAD_VCO_HW_MAX_HZ;  
+  cfg->clk_sys_nominal_hz = 133000000ULL;  
+  
+  // ПЧ и NCO-зоны приёмника (полный режим).  
+  cfg->if_shift_hz   = 11000u;  
+  cfg->nco_max_hz    = 62500u;  
+  cfg->nco_sweet_lo  = 9600u;  
+  cfg->nco_sweet_hi  = 14500u;  
+  cfg->nco_forbid_lo = 0u;  
+  cfg->nco_forbid_hi = 5000u;  
 }  
   
 // ---------------------------------------------------------------------------  
@@ -147,12 +158,12 @@ bool quad_vfo_init(const quad_vfo_cfg_t *cfg) {
                                                     return false;  
   if (cfg->nco_sweet_lo  > cfg->nco_sweet_hi)       return false;  
   if (cfg->nco_forbid_lo > cfg->nco_forbid_hi)      return false;  
-  // Точный режим несовместим с ПЧ-сдвигом: стоимость считается от  
-  // freq, а не от freq-shift — сдвиг игнорировался бы.  
-  if (cfg->nco_max_hz == 0 && cfg->if_shift_hz != 0) return false;  
   // ПЧ-проверка только в режиме приёмника (nco_max != 0).  
   if (cfg->nco_max_hz != 0 &&  
       cfg->if_shift_hz >= cfg->nco_max_hz)          return false;  
+  // Точный режим несовместим с ПЧ-сдвигом: стоимость считается  
+  // от freq, а не от freq-shift — LO игнорировал бы сдвиг.  
+  if (cfg->nco_max_hz == 0 && cfg->if_shift_hz != 0) return false;  
   
   if (cfg->pll_vco_max_hz == 0 ||  
       cfg->pll_vco_max_hz > QUAD_VCO_HW_MAX_HZ)     return false;  
@@ -163,61 +174,71 @@ bool quad_vfo_init(const quad_vfo_cfg_t *cfg) {
   if (!pll_profile_consistent(&cfg->pll_ceiling, cfg->xosc_hz))  
     return false;  
   
-  // === Фаза 2: проверка доступности ресурсов ДО освобождения старых ===  
+  // === Фаза 2: предварительная проверка ресурсов ===  
+  // Сначала определяем целевую SM и проверяем память PIO. До успешного  
+  // прохождения этих проверок прежняя конфигурация не изменяется.  
   bool same_sm = (s_sm_claimed && s_cfg.pio == cfg->pio &&  
                   cfg->sm >= 0 && (unsigned)cfg->sm == s_sm);  
   int target_sm = -1;  
   if (cfg->sm >= 0) {  
     if (!same_sm && pio_sm_is_claimed(cfg->pio, (uint)cfg->sm))  
-      return false;  
+      return false;                     // SM занята чужим кодом  
     target_sm = cfg->sm;  
   } else {  
-    // Автовыбор: предвыбираем SM до освобождения старой, чтобы не  
-    // попасть в pio_claim_unused_sm(required=true) -> panic.  
+    // Автовыбор: первая свободная SM в целевом PIO. Своя занятая SM  
+    // тоже подходит — она будет освобождена или переиспользована.  
     for (int cand = 0; cand < 4; cand++) {  
       bool mine = (s_sm_claimed && s_cfg.pio == cfg->pio &&  
-                   (int)s_sm == cand);  
+                   s_sm == (unsigned)cand);  
       if (mine || !pio_sm_is_claimed(cfg->pio, (uint)cand)) {  
         target_sm = cand;  
         break;  
       }  
     }  
-    if (target_sm < 0) return false;   // свободных SM нет — старое сохранено  
+    if (target_sm < 0) return false;    // свободных SM нет — старое сохранено  
   }  
   
-  // === Фаза 3: освобождение прежних ресурсов ===  
+  // Проверка памяти инструкций в НОВОМ PIO до каких-либо изменений.  
+  int idx = (int)pio_get_index(cfg->pio);  
+  if (s_offset[idx] < 0 &&  
+      !pio_can_add_program(cfg->pio, &pio_quad_program)) {  
+    return false;                       // старый генератор не затронут  
+  }  
+  
+  // Загружаем программу и захватываем новую SM ДО освобождения старой.  
+  // pio_add_program() в Pico SDK может аварийно завершаться при нехватке  
+  // места, поэтому выше обязательно проверяем pio_can_add_program().  
+  if (s_offset[idx] < 0) {  
+    s_offset[idx] = (int)pio_add_program(cfg->pio, &pio_quad_program);  
+  }  
+  const unsigned new_offset = (unsigned)s_offset[idx];  
+  
+  const bool reuse_sm = s_sm_claimed &&  
+                        s_cfg.pio == cfg->pio &&  
+                        s_sm == (unsigned)target_sm;  
+  if (!reuse_sm) {  
+    // Целевая SM была проверена как свободная выше.  
+    pio_sm_claim(cfg->pio, (uint)target_sm);  
+  }  
+  
+  // Теперь новая конфигурация уже обеспечена ресурсами. Останавливаем  
+  // старую SM и освобождаем её только если она не переиспользуется.  
   if (s_sm_claimed) {  
     quad_vfo_stop();  
-    pio_sm_unclaim(s_cfg.pio, s_sm);  
-    s_sm_claimed = false;  
-  }  
-  
-  // === Фаза 4: захват новых ресурсов ===  
-  s_cfg      = *cfg;  
-  s_have_cfg = true;  
-  
-  int idx = (int)pio_get_index(s_cfg.pio);  
-  if (s_offset[idx] < 0) {  
-    int off = pio_add_program(s_cfg.pio, &pio_quad_program);  
-    if (off < 0) {                     // память инструкций исчерпана  
-      s_have_cfg = false;              // состояние: не инициализированы  
-      return false;  
+    if (!reuse_sm) {  
+      pio_sm_unclaim(s_cfg.pio, s_sm);  
     }  
-    s_offset[idx] = off;  
   }  
-  s_cur_offset = (unsigned)s_offset[idx];  
   
-  if (same_sm || (unsigned)target_sm == s_sm) {  
-    // Своя бывшая SM — уже unclaim'нута в фазе 3.  
-    pio_sm_claim(s_cfg.pio, (uint)target_sm);  
-  } else {  
-    pio_sm_claim(s_cfg.pio, (uint)target_sm);  
-  }  
-  s_sm         = (unsigned)target_sm;  
-  s_sm_claimed = true;  
+  s_cfg         = *cfg;  
+  s_have_cfg    = true;  
+  s_sm          = (unsigned)target_sm;  
+  s_sm_claimed  = true;  
+  s_cur_offset  = new_offset;  
   return true;  
 }  
   
+// ---------------------------------------------------------------------------  
 // Удобный init: LO = freq точно, без IF-сдвига и NCO-смещения.  
 // IF-сдвиг и зоны NCO нужны только приёмнику — задавайте их  
 // через полный quad_vfo_init(&cfg).  
@@ -237,55 +258,76 @@ bool quad_vfo_init_simple(PIO pio, uint8_t pin_i) {
 }  
   
 // ---------------------------------------------------------------------------  
+// Проверка NCO для заданного делителя с учётом фактической clk_sys.  
+// out_f_nco — смещение относительно freq_hz; в режиме приёмника это  
+// именно freq_hz - LO, а в режиме точной частоты — ошибка LO.  
+static bool div_nco_ok(uint64_t clk_sys_hz, uint32_t lo_hz,  
+                       uint32_t div_q8, int64_t *out_f_nco) {  
+  if (clk_sys_hz == 0 || div_q8 == 0) return false;  
+  
+  const uint64_t lo_got =  
+      (clk_sys_hz * 256ull) / (4ull * (uint64_t)div_q8);  
+  const int64_t f_nco = (s_cfg.nco_max_hz != 0)  
+      ? (int64_t)((uint64_t)lo_hz + s_cfg.if_shift_hz) - (int64_t)lo_got  
+      : (int64_t)lo_hz - (int64_t)lo_got;  
+  const uint64_t abs_hz = (uint64_t)(f_nco < 0 ? -f_nco : f_nco);  
+  
+  bool ok;  
+  if (s_cfg.nco_max_hz == 0) {  
+    // Половина шага между соседними Q8-делителями:  
+    // LO(q) = clk_sys * 64 / q, |dLO/dq| ≈ clk_sys*64/q²,  
+    // полушаг q→q+1 ≈ clk_sys*32/(q*(q+1)) + 1 Гц запаса.  
+    const uint64_t q   = div_q8;  
+    const uint64_t den = q * (q + 1ull);  
+    const uint64_t tol = den  
+        ? ((clk_sys_hz * 32ull + den - 1ull) / den) + 1ull  
+        : 0ull;  
+    ok = abs_hz <= tol;  
+  } else {  
+    ok = f_nco > 0 &&  
+         f_nco < (int64_t)s_cfg.nco_max_hz &&  
+         !(f_nco >= (int64_t)s_cfg.nco_forbid_lo &&  
+           f_nco <= (int64_t)s_cfg.nco_forbid_hi);  
+  }  
+  
+  if (out_f_nco) *out_f_nco = f_nco;  
+  return ok;  
+}  
+  
+// ---------------------------------------------------------------------------  
 // Пересчёт делителя от реальной clk_sys и проверка NCO-ограничений.  
 // Используется и на основном пути, и после отката PLL.  
 // Возвращает false, если ни один делитель не удовлетворяет ограничениям.  
 static bool recompute_div(uint64_t clk_sys_hz, uint32_t lo_hz,  
                           uint32_t *out_div_q8, int64_t *out_f_nco,  
                           bool *out_is_int) {  
-  // Целый делитель  
-  uint64_t D = (clk_sys_hz + 2ull * lo_hz) / (4ull * lo_hz);  
-  if (D < 2)      D = 2;  
-  if (D > 0xFFFF) D = 0xFFFF;  
-  uint32_t div_int = (uint32_t)(D << 8);  
+  uint32_t div_q8;  
+  {  
+    uint64_t D = (clk_sys_hz + 2ull * lo_hz) / (4ull * lo_hz);  
+    if (D < 2)      D = 2;  
+    if (D > 0xFFFF) D = 0xFFFF;  
+    div_q8 = (uint32_t)(D << 8);  
+  }  
+  uint32_t div_frac;  
+  {  
+    uint64_t q = (clk_sys_hz * 256ull + 2ull * lo_hz) / (4ull * lo_hz);  
+    if (q < (2u << 8))      q = 2u << 8;  
+    if (q > (0xFFFFu << 8)) q = 0xFFFFu << 8;  
+    div_frac = (uint32_t)q;  
+  }  
   
-  // Дробный Q8  
-  uint64_t q = (clk_sys_hz * 256ull + 2ull * lo_hz) / (4ull * lo_hz);  
-  if (q < (2u << 8))      q = 2u << 8;  
-  if (q > (0xFFFFu << 8)) q = 0xFFFFu << 8;  
-  uint32_t div_frac = (uint32_t)q;  
-  
-  // Оцениваем оба варианта по NCO-ограничениям  
-  uint32_t best_div = 0;  
-  int64_t  best_nco = 0;  
+  uint32_t best_div = 0, div_int = div_q8;  
+  int64_t  best_abs = INT64_MAX, best_nco = 0;  
   bool     best_int = true;  
-  int64_t  best_abs = INT64_MAX;  
   
   for (int k = 0; k < 2; k++) {  
     uint32_t dq = (k == 0) ? div_int : div_frac;  
-    uint64_t lo_got = (clk_sys_hz * 256ull) / (4ull * (uint64_t)dq);  
-    int64_t  f_nco  = (int64_t)lo_hz - (int64_t)lo_got;  
-    // В приёмнике f_nco считается от freq (freq = lo_hz + if_shift);  
-    // в точном режиме lo_hz == freq — формула совпадает.  
-    int64_t  f_tgt  = (s_cfg.nco_max_hz != 0)  
-                      ? (int64_t)(lo_hz + s_cfg.if_shift_hz) - (int64_t)lo_got  
-                      : f_nco;  
-    int64_t  a      = (f_tgt < 0) ? -f_tgt : f_tgt;  
-  
-    bool nco_ok;  
-    if (s_cfg.nco_max_hz == 0) {  
-      nco_ok = (a <= (int64_t)QUAD_EXACT_MODE_TOL_HZ);  
-    } else {  
-      nco_ok = (f_tgt > 0 &&  
-                f_tgt < (int64_t)s_cfg.nco_max_hz &&  
-                !(f_tgt >= (int64_t)s_cfg.nco_forbid_lo &&  
-                  f_tgt <= (int64_t)s_cfg.nco_forbid_hi));  
-    }  
-    if (!nco_ok) continue;  
-    if (a < best_abs) { best_abs = a; best_div = dq; best_nco = f_tgt;  
+    int64_t f_nco;  
+    if (!div_nco_ok(clk_sys_hz, lo_hz, dq, &f_nco)) continue;  
+    int64_t a = (f_nco < 0) ? -f_nco : f_nco;  
+    if (a < best_abs) { best_abs = a; best_div = dq; best_nco = f_nco;  
                         best_int = (k == 0); }  
   }  
-  
   if (best_div == 0) return false;  
   *out_div_q8 = best_div;  
   *out_f_nco  = best_nco;  
@@ -295,19 +337,20 @@ static bool recompute_div(uint64_t clk_sys_hz, uint32_t lo_hz,
   
 // ---------------------------------------------------------------------------  
 bool quad_vfo_start(uint32_t freq_hz) {  
-  if (!s_have_cfg || !s_sm_claimed) return false;  
-  if (freq_hz == 0)                 return false;  
-  // Невалидный вход — ранний отказ БЕЗ остановки работающего генератора.  
-  if (freq_hz <= s_cfg.if_shift_hz) return false;  
-  
+  if (!s_have_cfg) return false;  
+  if (freq_hz <= s_cfg.if_shift_hz) {  
+    // LO = freq - if_shift <= 0 бессмысленно: частота ниже ПЧ.  
+    // Ранний отказ: работающий генератор НЕ трогаем.  
+    return false;  
+  }  
   // Целевая частота LO — ниже частоты приёма на величину ПЧ  
-  // (в точном режиме if_shift_hz == 0 -> lo_hz == freq_hz).  
+  // (в точном режиме if_shift = 0, lo_hz == freq_hz).  
   uint32_t lo_hz = freq_hz - s_cfg.if_shift_hz;  
   Serial.printf("[QUAD] Целевая частота LO %lu\n", (unsigned long)lo_hz);  
   
   const uint64_t xosc_hz = s_cfg.xosc_hz;  
-  // Эффективный потолок скана = min(паспорт, аппаратный барьер 420 МГц).  
-  // Если паспорт не доказан (окно пустое) — потолок из pll_ceiling.  
+  // Эффективный потолок скана = min(паспорт, аппаратный барьер).  
+  // Паспорт "не доказан" (остался ~133 МГц) → окно пустое → pll_ceiling.  
   uint64_t clk_max = (s_cfg.clk_sys_max_hz < 420000000ULL)  
                      ? s_cfg.clk_sys_max_hz : 420000000ULL;  
   if (clk_max < s_cfg.clk_sys_min_hz) {  
@@ -317,26 +360,25 @@ bool quad_vfo_start(uint32_t freq_hz) {
                   (unsigned long)(s_cfg.clk_sys_max_hz / 1000000UL),  
                   (unsigned long)(clk_max / 1000000ULL));  
   }  
-  const uint64_t vco_max = (s_cfg.pll_vco_max_hz < QUAD_VCO_HW_MAX_HZ)  
-                           ? s_cfg.pll_vco_max_hz : QUAD_VCO_HW_MAX_HZ;  
+  const uint64_t vco_max = s_cfg.pll_vco_max_hz;  
   
   // Веса взвешенной суммы штрафов: W2 >> W3 >> W4 >> W5.  
-  const uint64_t W2 = 1000000000ull;  // П2: удаление от сладкой зоны / |f_nco|  
-  const uint64_t W3 = 1000000ull;     // П3: штраф за дробный делитель  
-  const uint64_t W4 = 1000ull;        // П4: близость дроби к k/8  
-  const uint64_t W5 = 1ull;           // П5: шина ниже максимума (за 1 МГц)  
+  const uint64_t W2 = 1000000000ull;  
+  const uint64_t W3 = 1000000ull;  
+  const uint64_t W4 = 1000ull;  
+  const uint64_t W5 = 1ull;  
   
   quad_vfo_pll_t best        = s_cfg.pll_nominal;  
-  uint64_t  best_cost   = UINT64_MAX;  
-  uint32_t  best_div_q8 = 0;  
-  bool      best_is_int = true;  
-  bool      best_legal  = false;  
+  uint64_t       best_cost   = UINT64_MAX;  
+  uint32_t       best_div_q8 = 0;  
+  bool           best_is_int = true;  
+  bool           best_legal  = false;  
   
   // Fallback «наименьшее зло»: лучший среди НЕлегальных.  
   quad_vfo_pll_t fb_best   = s_cfg.pll_nominal;  
-  uint64_t  fb_bad    = UINT64_MAX;  
-  uint32_t  fb_div_q8 = 0;  
-  bool      fb_is_int = true;  
+  uint64_t       fb_bad    = UINT64_MAX;  
+  uint32_t       fb_div_q8 = 0;  
+  bool           fb_is_int = true;  
   
   for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {  
     uint64_t ref_hz = xosc_hz / refdiv;  
@@ -350,15 +392,14 @@ bool quad_vfo_start(uint32_t freq_hz) {
           uint64_t clk = vco / pdiv;  
           if (clk < s_cfg.clk_sys_min_hz || clk > clk_max) continue;  
   
-          // Два варианта делителя на эту шину: целый и дробный (Q8).  
           for (int frac_mode = 0; frac_mode < 2; frac_mode++) {  
             uint32_t div_q8;  
-            if (frac_mode == 0) {                       // целый  
+            if (frac_mode == 0) {  
               uint64_t D = (clk + 2ull * lo_hz) / (4ull * lo_hz);  
               if (D < 2)      D = 2;  
               if (D > 0xFFFF) D = 0xFFFF;  
               div_q8 = (uint32_t)(D << 8);  
-            } else {                                    // дробный Q8  
+            } else {  
               uint64_t q = (clk * 256ull + 2ull * lo_hz) / (4ull * lo_hz);  
               if (q < (2u << 8))      q = 2u << 8;  
               if (q > (0xFFFFu << 8)) q = 0xFFFFu << 8;  
@@ -366,21 +407,16 @@ bool quad_vfo_start(uint32_t freq_hz) {
             }  
             uint64_t lo_got = (clk * 256ull) / (4ull * (uint64_t)div_q8);  
             // В режиме приёмника ПЧ должна быть > 0 (LO строго ниже  
-            // freq). В точном режиме допускаем любой знак ошибки —  
+            // freq). В точном режиме любой знак ошибки допустим —  
             // иначе отбрасываем само точное попадание.  
             if (s_cfg.nco_max_hz != 0 && lo_got >= freq_hz) continue;  
             int64_t f_nco = (int64_t)freq_hz - (int64_t)lo_got;  
   
-            // nco_max_hz == 0 -> любой f_nco легален (режим точной  
-            // частоты); иначе f_nco обязан быть в (0, nco_max).  
+            // nco_max_hz == 0 -> любой f_nco легален (точная частота).  
             if (s_cfg.nco_max_hz != 0 &&  
-                (f_nco <= 0 || f_nco >= (int64_t)s_cfg.nco_max_hz))  
-              continue;  
+                f_nco >= (int64_t)s_cfg.nco_max_hz) continue;  
   
-            uint32_t frac   = div_q8 & 0xFF;  
-            bool     is_int = (frac == 0);  
-  
-            // --- П1: жёсткий запрет дырки [forbid_lo..forbid_hi] ---  
+            // --- П1: жёсткий запрет [forbid_lo..forbid_hi] ---  
             // В точном режиме зоны нулевые — блок пропускаем,  
             // иначе f_nco==0 считалось бы "запретным".  
             if (s_cfg.nco_max_hz != 0 &&  
@@ -389,17 +425,17 @@ bool quad_vfo_start(uint32_t freq_hz) {
               uint64_t bad = (uint64_t)((int64_t)s_cfg.nco_forbid_hi - f_nco);  
               if (bad < fb_bad) {  
                 fb_bad    = bad;  
-                fb_best.refdiv = refdiv; fb_best.p1 = p1; fb_best.p2 = p2;  
-                fb_best.fbdiv  = fbdiv;  fb_best.clk_sys_hz = (uint32_t)clk;  
-                fb_best.vsel   = quad_vfo_vsel_for(clk);  
-                fb_best.is_oc  = (clk > s_cfg.clk_sys_nominal_hz);  
+                fb_best.refdiv=refdiv; fb_best.p1=p1; fb_best.p2=p2;  
+                fb_best.fbdiv=fbdiv;   fb_best.clk_sys_hz=clk;  
+                fb_best.vsel=quad_vfo_vsel_for(clk);  
+                fb_best.is_oc=(clk > s_cfg.clk_sys_nominal_hz);  
                 fb_div_q8 = div_q8;  
-                fb_is_int = is_int;  
+                fb_is_int = (frac_mode == 0);  
               }  
               continue;  
             }  
   
-            // --- взвешенная сумма штрафов П2..П5 ---  
+            // --- П2..П5: взвешенная сумма штрафов ---  
             uint64_t cost = 0;  
             if (s_cfg.nco_max_hz == 0) {  
               // Точная частота: главный критерий — минимум |f_nco|.  
@@ -410,23 +446,27 @@ bool quad_vfo_start(uint32_t freq_hz) {
               else if (f_nco > (int64_t)s_cfg.nco_sweet_hi)  
                 cost += (uint64_t)(f_nco - (int64_t)s_cfg.nco_sweet_hi) * W2;  
             }  
-            if (!is_int) cost += W3;                    // П3: дробность  
-            if (!is_int) {                              // П4: k/8  
-              int32_t m    = (int32_t)frac % 32;  
-              int32_t dist = (m < 16) ? m : 32 - m;  
-              cost += (uint64_t)(16 - dist) * W4;  
+            bool is_int = (frac_mode == 0);  
+            if (!is_int) {  
+              cost += W3;  
+              uint32_t frac = div_q8 & 0xFF;  
+              if (frac) {  
+                int32_t m    = (int32_t)frac % 32;  
+                int32_t dist = (m < 16) ? m : 32 - m;  
+                cost += (uint64_t)(16 - dist) * W4;  
+              }  
             }  
-            cost += ((clk_max - clk) / 1000000ull) * W5; // П5  
+            cost += ((clk_max - clk) / 1000000ull) * W5;  
   
             if (cost < best_cost) {  
               best_cost   = cost;  
               best_div_q8 = div_q8;  
               best_is_int = is_int;  
               best_legal  = true;  
-              best.refdiv = refdiv; best.p1 = p1; best.p2 = p2;  
-              best.fbdiv  = fbdiv;  best.clk_sys_hz = (uint32_t)clk;  
-              best.vsel   = quad_vfo_vsel_for(clk);  
-              best.is_oc  = (clk > s_cfg.clk_sys_nominal_hz);  
+              best.refdiv=refdiv; best.p1=p1; best.p2=p2;  
+              best.fbdiv=fbdiv;   best.clk_sys_hz=clk;  
+              best.vsel=quad_vfo_vsel_for(clk);  
+              best.is_oc=(clk > s_cfg.clk_sys_nominal_hz);  
             }  
           }  
         }  
@@ -434,8 +474,7 @@ bool quad_vfo_start(uint32_t freq_hz) {
     }  
   }  
   
-  // П6: пустой скан — не трогаем шину и честно отказываемся,  
-  // работающий генератор (если был) сохраняется.  
+  // --- П6: пустой скан → отказ, LO и шина не тронуты ---  
   if (!best_legal && fb_bad == UINT64_MAX) {  
     Serial.println("[QUAD] ОШИБКА: скан не дал ни одного кандидата — "  
                    "проверьте clk_sys_max_hz/pll_ceiling. LO не тронут.");  
@@ -449,55 +488,65 @@ bool quad_vfo_start(uint32_t freq_hz) {
     best_is_int = fb_is_int;  
   }  
   
-  // === Точка невозврата: дальше отказ -> fail_path ===  
+  // === Точка невозврата: гасим SM и перепрошиваем шину ===  
   pio_sm_set_enabled(s_cfg.pio, s_sm, false);  
   
   uint32_t vsel = best.vsel;  
   if (vsel == 0 || vsel < (uint32_t)VREG_VOLTAGE_1_10)  
     vsel = quad_vfo_vsel_for(best.clk_sys_hz);  
-  
   bool pll_ok = quad_vfo_set_clk_sys(&best, vsel,  
                                    &s_cfg.pll_nominal, xosc_hz);  
   
-  // Делитель пересчитываем от РЕАЛЬНОЙ шины — и на успехе, и после  
-  // отката на номинал (там реальная шина другая).  
+  // Делитель: на успехе сохраняем выбранный сканером (проверив его по  
+  // РЕАЛЬНОЙ шине); после отката PLL пересчитываем от фактической.  
   uint64_t clk_sys_hz = clock_get_hz(clk_sys);  
   uint32_t div_q8;  
   int64_t  f_nco;  
   bool     is_int;  
   
-  if (!recompute_div(clk_sys_hz, lo_hz, &div_q8, &f_nco, &is_int)) {  
+  bool have_div = false;  
+  if (pll_ok && clk_sys_hz != 0) {  
+    uint64_t diff = (clk_sys_hz > best.clk_sys_hz)  
+        ? clk_sys_hz - best.clk_sys_hz : best.clk_sys_hz - clk_sys_hz;  
+    // При нормальном захвате профиль и реальная шина должны совпадать  
+    // в пределах 1%; PLL-подсистема отдельно проверяет измерение ±0,3%.  
+    if (diff <= (uint64_t)best.clk_sys_hz / 100ull &&  
+        div_nco_ok(clk_sys_hz, lo_hz, best_div_q8, &f_nco)) {  
+      div_q8   = best_div_q8;  
+      is_int   = best_is_int;  
+      have_div = true;  
+    }  
+  }  
+  if (!have_div &&  
+      !recompute_div(clk_sys_hz, lo_hz, &div_q8, &f_nco, &is_int)) {  
     Serial.println("[QUAD] ОШИБКА: после перепрошивки шины ни один "  
                    "делитель не удовлетворяет NCO-ограничениям");  
     fail_path();  
     return false;  
   }  
-  
   if (!pll_ok) {  
-    // Шина на номинале (или XOSC при неудачном отката) — делитель  
-    // пересчитан и ограничения перепроверены, запускаем компромиссный LO.  
+    // Шина на номинале (или XOSC при неудачном откате): используем  
+    // делитель, рассчитанный заново для фактической частоты.  
     Serial.println("[QUAD] ВНИМАНИЕ: целевая шина не установлена — "  
                    "LO пересчитан под реальный clk_sys");  
   }  
   
-  s_lo_actual_hz = (uint32_t)((clk_sys_hz * 256ull) /  
-                              (4ull * (uint64_t)div_q8));  
+  // lo_actual в мГц для точности; hz — усечённая оценка.  
   {  
-    // Ошибка в миллигерцах: целевое LO*1000 минус фактическое.  
     uint64_t lo_mhz = (clk_sys_hz * 256ull * 1000ull) /  
                       (4ull * (uint64_t)div_q8);  
+    s_lo_actual_hz = (uint32_t)(lo_mhz / 1000ull);  
     s_lo_error_mhz = (int32_t)((int64_t)lo_hz * 1000 - (int64_t)lo_mhz);  
   }  
-  
   {  
-    uint32_t frac = div_q8 & 0xFF;  
     bool sweet = (s_cfg.nco_max_hz != 0 &&  
                   f_nco >= (int64_t)s_cfg.nco_sweet_lo &&  
                   f_nco <= (int64_t)s_cfg.nco_sweet_hi);  
-    Serial.printf("[QUAD] div=%lu+%lu/256 (%s)  lo=%lu Гц  "  
-                  "err=%ld мГц  f_nco=%ld Гц sweet=%d\n",  
-                  (unsigned long)(div_q8 >> 8), (unsigned long)frac,  
-                  frac ? "дробный" : "целый",  
+    Serial.printf("[QUAD] clk_sys=%llu Hz  clkdiv Q8=0x%lX (%s)  "  
+                  "LO=%lu Hz  err=%ld мГц  f_nco=%ld sweet=%d\n",  
+                  (unsigned long long)clk_sys_hz,  
+                  (unsigned long)div_q8,  
+                  is_int ? "целый" : "дробный",  
                   (unsigned long)s_lo_actual_hz,  
                   (long)s_lo_error_mhz,  
                   (long)f_nco, sweet ? 1 : 0);  
