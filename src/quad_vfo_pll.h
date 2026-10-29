@@ -4,12 +4,12 @@
 // Порт из src/vfo/soft_tx.cpp (RU0AOG). Глобалы убраны: xosc_hz и  
 // pll_nominal — параметры.  
 //  
-// ВАЖНО про LOCK: штатный pll_init() pico-sdk ждёт LOCK БЕСКОНЕЧНО  
-// (tight_loop_contents). Внешние таймауты в этой библиотеке защищают  
-// только ожидания ПОСЛЕ возврата pll_init — от зависания внутри SDK  
-// они не защищают. Если требуется ограниченное время операции, соберите  
-// с -DQUAD_VFO_BOUNDED_PLL: тогда регистры PLL настраиваются напрямую  
-// с контролируемым ожиданием захвата (без pll_init).  
+// LOCK: штатный pll_init() pico-sdk ждёт LOCK БЕСКОНЕЧНО и поэтому в  
+// этой библиотеке НЕ используется. Регистры PLL настраиваются напрямую  
+// последовательностью, эквивалентной pll_init() SDK (cs -> fbdiv_int ->  
+// pwr up -> LOCK -> prim -> postdiv release), но ожидание захвата  
+// ограничено QUAD_LOCK_TIMEOUT итерациями. При неудаче процедура  
+// прерывается до переключения clk_sys на неподтверждённый источник.  
 // ============================================================================  
 #pragma once  
 #include <Arduino.h>  
@@ -27,11 +27,13 @@ typedef struct {
   
 uint32_t quad_vfo_vsel_for(uint64_t clk_hz);  
   
-// Перепрограммирование pll_sys: detach clk_peri -> XOSC -> PLL ->  
-// LOCK -> SSI BAUDR -> clk_sys -> верификация frequency_count_khz x3.  
+// Перепрограммирование pll_sys: detach clk_peri -> XOSC -> PLL(bounded  
+// LOCK) -> SSI BAUDR -> clk_sys -> верификация frequency_count_khz x3.  
 // false — целевая частота НЕ подтверждена. Тогда библиотека пытается  
-// вернуть шину на nominal; если и это не удалось (LOCK не захвачен) —  
-// шина остаётся на XOSC и quad_vfo_clk_sys_hz() возвращает xosc_hz.  
+// вернуть шину на nominal; если и это не удалось — шина остаётся на  
+// XOSC и quad_vfo_clk_sys_hz() возвращает xosc_hz.  
+// Все переключения тактирования выполняются при выключенных прерываниях  
+// с восстановлением их прежнего состояния на любом выходе.  
 bool quad_vfo_set_clk_sys(const quad_vfo_pll_t *cfg, uint32_t vsel,  
                           const quad_vfo_pll_t *nominal, uint64_t xosc_hz);  
   
