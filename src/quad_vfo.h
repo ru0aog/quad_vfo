@@ -22,7 +22,7 @@
 typedef struct {  
   // --- Железо ---  
   PIO     pio;                 // pio0 / pio1  
-  int     sm;                  // 0..3 или -1 -> pio_claim_unused_sm()  
+  int     sm;                  // 0..3 или -1 -> автовыбор свободной SM  
   uint8_t pin_i;               // I = pin_i, Q = pin_i + 1 (обязательно смежные)  
   
   // --- PLL-подсистема ---  
@@ -31,7 +31,8 @@ typedef struct {
   uint64_t xosc_hz;            // опора PLL (обычно 12000000)  
   uint64_t clk_sys_min_hz;     // минимум окна сканера  
   uint64_t clk_sys_max_hz;     // паспортный потолок clk_sys  
-  uint64_t pll_vco_max_hz;     // потолок VCO (cap 1600 МГц по datasheet)  
+  uint64_t pll_vco_max_hz;     // пользовательский потолок VCO  
+                             // (<= аппаратного 1600 МГц)  
   uint64_t clk_sys_nominal_hz; // граница is_oc (133 МГц)  
   
   // --- ПЧ и NCO-зоны сканера ---  
@@ -50,16 +51,18 @@ extern "C" {
 void quad_vfo_default_cfg(quad_vfo_cfg_t *cfg);  
   
 // Полный init. Транзакционный: сначала валидируется новая конфигурация  
-// и проверяется доступность ресурсов, только потом освобождаются прежние.  
-// При false прежняя рабочая конфигурация (если была) сохраняется.  
+// и проверяется доступность ресурсов (включая автовыбор SM — без паники  
+// SDK), только потом освобождаются прежние. При false прежняя рабочая  
+// конфигурация (если была) сохраняется.  
 bool quad_vfo_init(const quad_vfo_cfg_t *cfg);  
   
 // Удобный init: дефолт-cfg + заданные pio/pin_i, SM — автовыбор.  
 bool quad_vfo_init_simple(PIO pio, uint8_t pin_i);  
   
 // Запуск LO на freq_hz (LO = freq_hz - cfg.if_shift_hz).  
-// false, если: freq_hz <= if_shift_hz (ранний отказ, генератор не тронут);  
-// скан дал 0 кандидатов; после переключения clk_sys NCO вне допустимых  
+// false, если: freq_hz <= if_shift_hz (ранний отказ, работающий  
+// генератор не тронут); скан дал 0 кандидатов (генератор не тронут);  
+// переключение clk_sys провалилось или после него NCO вне допустимых  
 // зон (генератор остановлен — согласованное состояние: SM off, пины в  
 // input, active=false, actual_hz=0).  
 bool quad_vfo_start(uint32_t freq_hz);  

@@ -4,39 +4,38 @@
 // Порт из src/vfo/soft_tx.cpp (RU0AOG). Глобалы убраны: xosc_hz и  
 // pll_nominal — параметры.  
 //  
-// LOCK: штатный pll_init() pico-sdk ждёт LOCK БЕСКОНЕЧНО и поэтому в  
-// этой библиотеке НЕ используется. Регистры PLL настраиваются напрямую  
-// последовательностью, эквивалентной pll_init() SDK (cs -> fbdiv_int ->  
-// pwr up -> LOCK -> prim -> postdiv release), но ожидание захвата  
-// ограничено QUAD_LOCK_TIMEOUT итерациями. При неудаче процедура  
-// прерывается до переключения clk_sys на неподтверждённый источник.  
+// Про LOCK: штатный pll_init() pico-sdk ждёт LOCK БЕСКОНЕЧНО и поэтому  
+// здесь НЕ используется. Регистры настраиваются напрямую по  
+// последовательности pll_deinit()+pll_init() из SDK (clocks.c) с  
+// ограниченным ожиданием захвата — вечного цикла нет ни в одном пути.  
+// Перед использованием сверьте pll_setup_bounded() с clocks.c вашей  
+// версии pico-sdk.  
 // ============================================================================  
 #pragma once  
 #include <Arduino.h>  
   
 typedef struct {  
   uint32_t fbdiv;       // множитель VCO (16..320)  
-  uint32_t p1, p2;      // post-делители (p1 >= 2!)  
-  uint32_t clk_sys_hz;  // итоговая частота шины, Гц. Обязана быть  
-                        // согласована с fbdiv/refdiv/p1/p2 и xosc —  
-                        // проверяется в quad_vfo_init.  
+  uint32_t p1, p2;      // post-делители (p1 >= 2: p1=1 делит пополам  
+                        // недокументированно — отклоняется)  
+  uint32_t clk_sys_hz;  // итоговая частота шины, Гц — должна быть  
+                        // согласована с fbdiv/refdiv/p1/p2/xosc  
   uint32_t vsel;        // VREG_VOLTAGE_*  
   bool     is_oc;  
   uint32_t refdiv;      // делитель опоры (>=1)  
 } quad_vfo_pll_t;  
   
+// VSEL по частоте шины (таблица исходника).  
 uint32_t quad_vfo_vsel_for(uint64_t clk_hz);  
   
-// Перепрограммирование pll_sys: detach clk_peri -> XOSC -> PLL(bounded  
-// LOCK) -> SSI BAUDR -> clk_sys -> верификация frequency_count_khz x3.  
-// false — целевая частота НЕ подтверждена. Тогда библиотека пытается  
-// вернуть шину на nominal; если и это не удалось — шина остаётся на  
-// XOSC и quad_vfo_clk_sys_hz() возвращает xosc_hz.  
-// Все переключения тактирования выполняются при выключенных прерываниях  
-// с восстановлением их прежнего состояния на любом выходе.  
+// Перепрограммирование pll_sys. false — целевая частота НЕ  
+// подтверждена. При false библиотека пытается оставить шину на  
+// номинале; если и это не удалось — шина остаётся на XOSC и  
+// quad_vfo_clk_sys_hz() вернёт xosc_hz (видно по quad_vfo_debug()).  
 bool quad_vfo_set_clk_sys(const quad_vfo_pll_t *cfg, uint32_t vsel,  
-                          const quad_vfo_pll_t *nominal, uint64_t xosc_hz);  
+                          const quad_vfo_pll_t *nominal,  
+                          uint64_t xosc_hz);  
   
 // Частота шины по последней подтверждённой прошивке (или xosc после  
-// неудачного отката — система при этом работает на опоре).  
+// неудачного отката).  
 uint32_t quad_vfo_clk_sys_hz(void);
