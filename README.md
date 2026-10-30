@@ -359,3 +359,31 @@ PLL: refdiv=1 fbdiv=71 postdiv=3/1  VCO=852000000 Hz (target)
 - откалибровать частоту по внешнему эталону.
 
 **Важно:** успешный захват PLL и измерение `clk_sys` подтверждают работу системного тактирования, но не гарантируют лабораторную точность LO или соответствие выходного спектра требованиям конкретного передатчика.
+
+## Авторство и лицензия  
+  
+**Автор:** RU0AOG  
+  
+Портировано из `src/vfo/soft_rx.cpp` и `src/vfo/soft_tx.cpp` (проект RU0AOG) — квадратурный LO `quad_*` и подсистема PLL изолированы от зависимостей `vfo/pins/soft_tx/mem_arena` в отдельную библиотеку `quad_vfo`.  
+  
+**Лицензия:** MIT  
+  
+Copyright (c) 2025–2026 RU0AOG  
+  
+Permission is hereby granted, free of charge, to any person obtaining a copy  
+of this software and associated documentation files (the "Software"), to deal  
+in the Software without restriction, including without limitation the rights  
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell  
+copies of the Software, and to permit persons to whom the Software is  
+furnished to do so, subject to the following conditions:  
+  
+The above copyright notice and this permission notice shall be included in  
+all copies or substantial portions of the Software.  
+  
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR  
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,  
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE  
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER  
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,  
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN  
+THE SOFTWARE.
