@@ -62,7 +62,7 @@ static unsigned s_sm         = 0;
 static bool     s_sm_claimed = false;  
 static bool     s_active     = false;  
 static uint32_t s_lo_actual_hz = 0;  
-static int32_t  s_lo_error_mhz = 0;  
+static int32_t  s_lo_error_hz = 0;  
   
 // Программа загружается в каждый PIO-блок отдельно.  
 static int      s_offset[2]    = { -1, -1 };  // по индексу pio_get_index()  
@@ -107,7 +107,7 @@ static void fail_path(void) {
   gpio_set_dir(s_cfg.pin_i + 1, GPIO_IN);  
   s_active       = false;  
   s_lo_actual_hz = 0;  
-  s_lo_error_mhz = 0;  
+  s_lo_error_hz = 0;  
 }  
   
 // ---------------------------------------------------------------------------  
@@ -505,51 +505,47 @@ bool quad_vfo_start(uint32_t freq_hz) {
   int64_t  f_nco;  
   bool     is_int;  
   
-  bool have_div = false;  
+// Захват считаем подтверждённым ТОЛЬКО если set_clk_sys отрапортовал  
+  // успех (аппаратный LOCK + измерение ±0,3%) И фактическая шина  
+  // совпадает с целевой в пределах 1%. Иначе — отказ.  
+  bool locked = false;  
   if (pll_ok && clk_sys_hz != 0) {  
     uint64_t diff = (clk_sys_hz > best.clk_sys_hz)  
         ? clk_sys_hz - best.clk_sys_hz : best.clk_sys_hz - clk_sys_hz;  
-    // При нормальном захвате профиль и реальная шина должны совпадать  
-    // в пределах 1%; PLL-подсистема отдельно проверяет измерение ±0,3%.  
-    if (diff <= (uint64_t)best.clk_sys_hz / 100ull &&  
-        div_nco_ok(clk_sys_hz, lo_hz, best_div_q8, &f_nco)) {  
-      div_q8   = best_div_q8;  
-      is_int   = best_is_int;  
-      have_div = true;  
-    }  
+    locked = (diff <= (uint64_t)best.clk_sys_hz / 100ull);  
   }  
-  if (!have_div &&  
-      !recompute_div(clk_sys_hz, lo_hz, &div_q8, &f_nco, &is_int)) {  
-    Serial.println("[QUAD] ОШИБКА: после перепрошивки шины ни один "  
-                   "делитель не удовлетворяет NCO-ограничениям");  
+  if (!locked) {  
+    Serial.println("[QUAD] ОШИБКА: захват PLL не подтверждён — "  
+                   "генератор не запущен, шина на номинале");  
     fail_path();  
     return false;  
   }  
-  if (!pll_ok) {  
-    // Шина на номинале (или XOSC при неудачном откате): используем  
-    // делитель, рассчитанный заново для фактической частоты.  
-    Serial.println("[QUAD] ВНИМАНИЕ: целевая шина не установлена — "  
-                   "LO пересчитан под реальный clk_sys");  
+  if (!div_nco_ok(clk_sys_hz, lo_hz, best_div_q8, &f_nco)) {  
+    Serial.println("[QUAD] ОШИБКА: выбранный делитель не проходит "  
+                   "NCO-ограничения на фактической шине");  
+    fail_path();  
+    return false;  
   }  
-  
-  // lo_actual в мГц для точности; hz — усечённая оценка.  
+  div_q8 = best_div_q8;  
+  is_int = best_is_int;
+
   {  
-    uint64_t lo_mhz = (clk_sys_hz * 256ull * 1000ull) /  
-                      (4ull * (uint64_t)div_q8);  
-    s_lo_actual_hz = (uint32_t)(lo_mhz / 1000ull);  
-    s_lo_error_mhz = (int32_t)((int64_t)lo_hz * 1000 - (int64_t)lo_mhz);  
-  }  
+    uint64_t lo_got = (clk_sys_hz * 256ull) / (4ull * (uint64_t)div_q8);  
+    s_lo_actual_hz = (uint32_t)lo_got;  
+    s_lo_error_hz  = (int32_t)((int64_t)lo_hz - (int64_t)lo_got);  
+  }
+
   {  
     bool sweet = (s_cfg.nco_max_hz != 0 &&  
                   f_nco >= (int64_t)s_cfg.nco_sweet_lo &&  
                   f_nco <= (int64_t)s_cfg.nco_sweet_hi);  
-    Serial.printf("[QUAD] clk_sys=%llu Hz  clkdiv Q8=0x%lX (%s)  "  
-                  "LO=%lu Hz  err=%ld мГц  f_nco=%ld sweet=%d\n",  
+  Serial.printf("[QUAD] clk_sys=%llu Hz  clkdiv Q8=0x%lX (%s)  "  
+                  "LO=%lu Hz  err=%ld Hz  f_nco=%ld sweet=%d\n",  
                   (unsigned long long)clk_sys_hz,  
                   (unsigned long)div_q8,  
                   is_int ? "целый" : "дробный",  
                   (unsigned long)s_lo_actual_hz,  
-                  (long)s_lo_error_mhz,  
+                  (long)s_lo_error_hz,  
                   (long)f_nco, sweet ? 1 : 0);  
   }  
   
@@ -580,11 +576,11 @@ void quad_vfo_stop(void) {
   gpio_set_dir(s_cfg.pin_i + 1, GPIO_IN);  
   s_active       = false;  
   s_lo_actual_hz = 0;  
-  s_lo_error_mhz = 0;  
+  s_lo_error_hz = 0;  
 }  
   
 uint32_t quad_vfo_actual_hz(void) { return s_lo_actual_hz; }  
-int32_t  quad_vfo_error_mhz(void) { return s_lo_error_mhz; }  
+int32_t  quad_vfo_error_hz(void) { return s_lo_error_hz; }  
 bool     quad_vfo_active(void)    { return s_active; }  
   
 // ---------------------------------------------------------------------------  
@@ -607,6 +603,6 @@ void quad_vfo_debug(void) {
                 (int)((s_cfg.pio->ctrl & (1u << s_sm)) != 0),  
                 (unsigned long)s_cfg.pio->sm[s_sm].execctrl);  
   Serial.printf("[LODBG] lo_hz=%lu  err=%ld мГц  active=%d\n",  
-                (unsigned long)s_lo_actual_hz, (long)s_lo_error_mhz,  
+                (unsigned long)s_lo_actual_hz, (long)s_lo_error_hz,  
                 (int)s_active);  
 }

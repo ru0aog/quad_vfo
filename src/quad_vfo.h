@@ -74,9 +74,9 @@ void quad_vfo_stop(void);
 // конфигурации тактирования, не лабораторное измерение.  
 uint32_t quad_vfo_actual_hz(void);  
   
-// Расчётная ошибка настройки LO в миллигерцах относительно принятой  
+// Расчётная ошибка настройки LO в герцах относительно принятой  
 // частоты clk_sys (не независимое измерение). Знак: >0 — LO ниже цели.  
-int32_t quad_vfo_error_mhz(void);  
+int32_t quad_vfo_error_hz(void);
   
 bool quad_vfo_active(void);  
   
