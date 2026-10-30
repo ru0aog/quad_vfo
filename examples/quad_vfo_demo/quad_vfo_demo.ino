@@ -44,8 +44,8 @@ void setup() {
   Serial.println("\n ==== КВАДРАТУРНЫЙ ГЕНЕРАТОР ==== ");
  
   // инициализация генератора:
-  // блок ввода-вывода PIO1, пины I = GP28, Q = GP1, SM — первая свободная
-  if (!quad_vfo_init_simple(pio1, 28)) {
+  // блок ввода-вывода PIO1, пины I = GP0, Q = GP1, SM — первая свободная
+  if (!quad_vfo_init_simple(pio1, 0)) {
     Serial.println("quad_vfo_init_simple failed (заняты SM или нет памяти программ PIO)");
     while (1) delay(1000);
   }
