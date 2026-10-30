@@ -20,7 +20,7 @@ void setup() {
   
   cfg.pio            = pio0;             // PIO0  (pio0 или pio1)
   cfg.sm             = 0;                // SM0 (0, 1, 2 или 3. -1 = автовыбор)  
-  cfg.pin_i          = 28;               // I = GP28, Q = GP29 (Любая смежная пара
+  cfg.pin_i          = 0;                // I = GP0, Q = GP1 (Любая смежная пара
                                          // pin_i (I) и pin_i+1 (Q), ограничение: pin_i ≤ 28
   cfg.clk_sys_max_hz = 380000000ULL;     // потолок системной шины 380 МГц  
   cfg.pll_vco_max_hz = 4200000000ULL;    // потолок VCO 4.2 ГГц (выше даташита —  
@@ -37,7 +37,7 @@ void setup() {
     while (1) delay(100);  
   }  
 
-  uint32_t freq = 36864000;
+  uint32_t freq = 3650250;
   
   // LO = 14063000 Гц + 11000 → приём на 14074000 Гц 
   if (!quad_vfo_start(freq)) {  
