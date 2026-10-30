@@ -25,11 +25,16 @@
 #include "hardware/clocks.h"
 #include "hardware/vreg.h"
 
-// Аппаратные ограничения pll_sys (datasheet): VCO 400..1600 МГц.
-// Это НЕ пользовательский предел pll_vco_max_hz — он проверяется
-// в init отдельно и может быть уже, но не шире.
-#define QUAD_VCO_HW_MIN_HZ 400000000ULL
-#define QUAD_VCO_HW_MAX_HZ 1600000000ULL
+// Аппаратные ограничения pll_sys (datasheet): VCO 400..1600 МГц.  
+// Это НЕ пользовательский предел pll_vco_max_hz — он проверяется  
+// в init отдельно и может быть уже, но не шире.  
+#define QUAD_VCO_HW_MIN_HZ 400000000ULL  
+#define QUAD_VCO_HW_MAX_HZ 1600000000ULL  
+  
+// Электрический предел GPIO: выше ~45–50 МГц slew-rate пинов  
+// превращает квадратурный меандр в ослабленный синус с разваленной  
+// фазой — генерация смысла не имеет.  
+#define QUAD_VFO_LO_MAX_HZ 45000000u
 
 // ---------------------------------------------------------------------------
 // PIO-программа квадратурного LO: 4 инструкции, set pins n.
@@ -308,11 +313,18 @@ static bool recompute_div(uint64_t clk_sys_hz, uint32_t lo_hz,
 }
 
 // ---------------------------------------------------------------------------
-bool quad_vfo_start(uint32_t freq_hz) {
-  if (!s_have_cfg) return false;
-  if (freq_hz <= s_cfg.if_shift_hz) return false;
-
-  uint32_t lo_hz = freq_hz - s_cfg.if_shift_hz;
+bool quad_vfo_start(uint32_t freq_hz) {  
+  if (!s_have_cfg) return false;  
+  if (freq_hz <= s_cfg.if_shift_hz) return false;  
+  
+  uint32_t lo_hz = freq_hz - s_cfg.if_shift_hz;  
+  if (lo_hz > QUAD_VFO_LO_MAX_HZ) {  
+    Serial.printf("[QUAD] ОШИБКА: LO=%lu выше предела %lu Гц — "  
+                  "запуск отменён\n",  
+                  (unsigned long)lo_hz,  
+                  (unsigned long)QUAD_VFO_LO_MAX_HZ);  
+    return false;  
+  }  
   Serial.printf("[QUAD] Целевая частота LO %lu\n", (unsigned long)lo_hz);
 
   const uint64_t xosc_hz = s_cfg.xosc_hz;
