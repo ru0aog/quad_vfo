@@ -37,7 +37,7 @@ void setup() {
     while (1) delay(100);  
   }  
 
-  uint32_t freq = 3650250;
+  uint32_t freq = 14074000;
   
   // LO = 14063000 Гц + 11000 → приём на 14074000 Гц 
   if (!quad_vfo_start(freq)) {  
