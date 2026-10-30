@@ -69,6 +69,12 @@ static bool     s_pll_nominal_used = false;
 static int      s_offset[2]    = { -1, -1 };
 static unsigned s_cur_offset   = 0;
 
+// Тихий режим: подавляет весь Serial-вывод библиотеки ([QUAD]) и,  
+// через quad_vfo_pll_set_quiet(), вывод PLL-подсистемы ([PLL]).  
+// Нужен при перестройке энкодером — чтобы не спамить терминал.  
+static bool s_quiet = false;  
+#define QV_LOG(...)  do { if (!s_quiet) Serial.printf(__VA_ARGS__); } while (0)
+
 // ---------------------------------------------------------------------------
 static bool pio_ok(PIO p) { return p == pio0 || p == pio1; }
 
@@ -319,20 +325,20 @@ bool quad_vfo_start(uint32_t freq_hz) {
   
   uint32_t lo_hz = freq_hz - s_cfg.if_shift_hz;  
   if (lo_hz > QUAD_VFO_LO_MAX_HZ) {  
-    Serial.printf("[QUAD] ОШИБКА: LO=%lu выше предела %lu Гц — "  
+    QV_LOG("[QUAD] ОШИБКА: LO=%lu выше предела %lu Гц — "  
                   "запуск отменён\n",  
                   (unsigned long)lo_hz,  
                   (unsigned long)QUAD_VFO_LO_MAX_HZ);  
     return false;  
   }  
-  Serial.printf("[QUAD] Целевая частота LO %lu\n", (unsigned long)lo_hz);
+  QV_LOG("[QUAD] Целевая частота LO %lu\n", (unsigned long)lo_hz);
 
   const uint64_t xosc_hz = s_cfg.xosc_hz;
   uint64_t clk_max = (s_cfg.clk_sys_max_hz < 420000000ULL)
                      ? s_cfg.clk_sys_max_hz : 420000000ULL;
   if (clk_max < s_cfg.clk_sys_min_hz) {
     clk_max = s_cfg.pll_ceiling.clk_sys_hz;
-    Serial.printf("[QUAD] выполнен разгон: потолок clk_sys_max_hz=%lu МГц"
+    QV_LOG("[QUAD] выполнен разгон: потолок clk_sys_max_hz=%lu МГц"
                   " (паспорт %lu МГц)\n",
                   (unsigned long)(clk_max / 1000000ULL),
                   (unsigned long)(s_cfg.clk_sys_max_hz / 1000000ULL));
@@ -476,7 +482,7 @@ bool quad_vfo_start(uint32_t freq_hz) {
     return false;
   }
   if (!pll_ok && nominal_ok) {
-    Serial.printf("[QUAD] ВНИМАНИЕ: целевой PLL не подтверждён; "
+    QV_LOG("[QUAD] ВНИМАНИЕ: целевой PLL не подтверждён; "
                   "используется восстановленный номинальный профиль "
                   "(clk_sys=%llu Hz)\n",
                   (unsigned long long)clk_sys_hz);
@@ -485,7 +491,7 @@ bool quad_vfo_start(uint32_t freq_hz) {
   if (clk_sys_hz != best.clk_sys_hz) {
     uint64_t diff = (clk_sys_hz > best.clk_sys_hz)
         ? clk_sys_hz - best.clk_sys_hz : best.clk_sys_hz - clk_sys_hz;
-    Serial.printf("[QUAD] ВНИМАНИЕ: шина %llu Hz вместо целевых %lu "
+    QV_LOG("[QUAD] ВНИМАНИЕ: шина %llu Hz вместо целевых %lu "
                   "(расхождение %llu Hz) — пересчёт делителя\n",
                   (unsigned long long)clk_sys_hz,
                   (unsigned long)best.clk_sys_hz,
@@ -527,7 +533,7 @@ bool quad_vfo_start(uint32_t freq_hz) {
                   f_nco <= (int64_t)s_cfg.nco_sweet_hi);  
     uint64_t vco_hz = (s_pll_refdiv)  
         ? (xosc_hz / s_pll_refdiv) * s_pll_fbdiv : 0;  
-    Serial.printf("[QUAD] clk_sys=%llu Hz  PLL refdiv=%u fbdiv=%u "  
+    QV_LOG("[QUAD] clk_sys=%llu Hz  PLL refdiv=%u fbdiv=%u "  
                   "p1=%u p2=%u VCO=%llu Hz%s  "  
                   "clkdiv Q8=0x%lX (%s)  LO=%lu Hz  err=%ld Hz  "  
                   "f_nco=%ld sweet=%d\n",  
@@ -578,6 +584,27 @@ uint32_t quad_vfo_actual_hz(void) { return s_lo_actual_hz; }
 int32_t quad_vfo_error_hz(void) { return s_lo_error_hz; }
 bool quad_vfo_active(void) { return s_active; }
 
+// Параметры фактически применённого профиля PLL из последнего  
+// успешного старта. До старта / после stop возвращают нули.  
+uint16_t quad_vfo_pll_refdiv(void)  { return s_pll_refdiv; }  
+uint16_t quad_vfo_pll_fbdiv(void)   { return s_pll_fbdiv; }  
+uint8_t  quad_vfo_pll_p1(void)      { return s_pll_p1; }  
+uint8_t  quad_vfo_pll_p2(void)      { return s_pll_p2; }  
+// true — работаем на восстановленном номинальном профиле (rollback),  
+// false — на целевом профиле сканера.  
+bool     quad_vfo_pll_nominal(void) { return s_pll_nominal_used; }  
+
+void quad_vfo_set_quiet(bool on) {  
+  s_quiet = on;  
+  quad_vfo_pll_set_quiet(on);  
+}
+
+// VCO применённого профиля в Гц: xosc/refdiv*fbdiv; 0 — не запущен.  
+uint64_t quad_vfo_pll_vco_hz(void) {  
+  return s_pll_refdiv  
+      ? (s_cfg.xosc_hz / s_pll_refdiv) * s_pll_fbdiv : 0;  
+}
+
 // ---------------------------------------------------------------------------
 void quad_vfo_debug(void) {
   if (!s_have_cfg) {
@@ -587,28 +614,28 @@ void quad_vfo_debug(void) {
   uint32_t meas_clk = quad_vfo_clk_sys_meas_hz();  
   uint32_t cdiv = s_cfg.pio->sm[s_sm].clkdiv;  
   
-  Serial.printf("[LODBG] clk_sys: cached=%lu Hz  measured=%lu Hz "  
+  QV_LOG("[LODBG] clk_sys: cached=%lu Hz  measured=%lu Hz "  
                 "(delta=%ld Hz)\n",  
                 (unsigned long)clock_get_hz(clk_sys),  
                 (unsigned long)meas_clk,  
                 (long)((int64_t)meas_clk - (int64_t)clock_get_hz(clk_sys)));
-  Serial.printf("[LODBG] PIO=%d SM=%d offset=%u  clkdiv=0x%08lX "
+  QV_LOG("[LODBG] PIO=%d SM=%d offset=%u  clkdiv=0x%08lX "
                 "(int=%lu frac=%lu)\n",
                 pio_get_index(s_cfg.pio), (int)s_sm, s_cur_offset,
                 (unsigned long)cdiv,
                 (unsigned long)(cdiv >> 16),
                 (unsigned long)((cdiv >> 8) & 0xFF));
-  Serial.printf("[LODBG] SM ctrl=0x%08lX enabled=%d  execctrl=0x%08lX\n",
+  QV_LOG("[LODBG] SM ctrl=0x%08lX enabled=%d  execctrl=0x%08lX\n",
                 (unsigned long)s_cfg.pio->ctrl,
                 (int)((s_cfg.pio->ctrl & (1u << s_sm)) != 0),
                 (unsigned long)s_cfg.pio->sm[s_sm].execctrl);
-  Serial.printf("[LODBG] lo_hz=%lu err=%ld Hz active=%d\n",
+  QV_LOG("[LODBG] lo_hz=%lu err=%ld Hz active=%d\n",
                 (unsigned long)s_lo_actual_hz,
                 (long)s_lo_error_hz,
                 (int)s_active);
   uint64_t vco_hz = (s_pll_refdiv)  
       ? (s_cfg.xosc_hz / s_pll_refdiv) * s_pll_fbdiv : 0;  
-  Serial.printf("[LODBG] PLL: refdiv=%u fbdiv=%u postdiv=%u/%u "  
+  QV_LOG("[LODBG] PLL: refdiv=%u fbdiv=%u postdiv=%u/%u "  
                 "VCO=%llu Hz %s\n",  
                 (unsigned)s_pll_refdiv, (unsigned)s_pll_fbdiv,  
                 (unsigned)s_pll_p1, (unsigned)s_pll_p2,  

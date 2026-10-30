@@ -25,6 +25,11 @@
 
 static uint32_t s_clk_sys_hz = 133000000;
 
+// Тихий режим — см. quad_vfo_set_quiet() в quad_vfo.cpp.  
+static bool s_pll_quiet = false;  
+#define QP_LOG(...)  do { if (!s_pll_quiet) Serial.printf(__VA_ARGS__); } while (0)  
+void quad_vfo_pll_set_quiet(bool on) { s_pll_quiet = on; }  
+
 uint32_t quad_vfo_clk_sys_hz(void) { return s_clk_sys_hz; }
 
 // Измерение clk_sys через SDK-функцию: разрешение 1 кГц.  

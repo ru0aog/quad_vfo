@@ -79,7 +79,23 @@ uint32_t quad_vfo_actual_hz(void);
 int32_t quad_vfo_error_hz(void);
   
 bool quad_vfo_active(void);  
-  
+
+// Подавляет весь Serial-вывод [QUAD]/[PLL] (кроме quad_vfo_debug()).  
+// Применение: обернуть quad_vfo_stop()+quad_vfo_start() при перестройке  
+// энкодером, чтобы не спамить терминал на каждый шаг.  
+void quad_vfo_set_quiet(bool on);
+
+// Параметры применённого профиля PLL после успешного quad_vfo_start.  
+// Нули до первого старта и после quad_vfo_stop. quad_vfo_pll_nominal  
+// возвращает true, если встал восстановленный номинальный профиль  
+// (целевой PLL не подтвердил захват).  
+uint16_t quad_vfo_pll_refdiv(void);  
+uint16_t quad_vfo_pll_fbdiv(void);  
+uint8_t  quad_vfo_pll_p1(void);  
+uint8_t  quad_vfo_pll_p2(void);  
+bool     quad_vfo_pll_nominal(void);  
+uint64_t quad_vfo_pll_vco_hz(void);
+
 // Диагностика в Serial.  
 void quad_vfo_debug(void);  
   
