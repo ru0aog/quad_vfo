@@ -1,5 +1,5 @@
 # quad_vfo — квадратурный LO на PIO для RP2040  
-*Автор: RU0AOG · Лицензия: MIT*
+*Автор: RU0AOG Stanislav · Лицензия: MIT*
 
 ### Автономная библиотека квадратурного гетеродина (quadrature LO / VFO) для Raspberry Pi Pico / RP2040. 
 Генерирует на двух соседних GPIO два меандра одной частоты со сдвигом фазы 90° (I/Q) — для питания SDR-смесителей (Tayloe, QSD/QSE, фазовых детекторов).
@@ -362,7 +362,7 @@ PLL: refdiv=1 fbdiv=71 postdiv=3/1  VCO=852000000 Hz (target)
 
 ## Авторство и лицензия  
   
-**Автор:** RU0AOG  
+**Автор:** RU0AOG Stanislav
   
 Портировано из `src/vfo/soft_rx.cpp` и `src/vfo/soft_tx.cpp` (проект RU0AOG) — квадратурный LO `quad_*` и подсистема PLL изолированы от зависимостей `vfo/pins/soft_tx/mem_arena` в отдельную библиотеку `quad_vfo`.  
   
