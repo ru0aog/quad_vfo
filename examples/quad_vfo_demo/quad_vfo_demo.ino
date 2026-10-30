@@ -16,13 +16,21 @@
 static uint32_t s_freq = 7100000;
 
 // вывод отчёта
-static void report(void) {
-  Serial.printf("active=%d  LO=%lu Гц  расч.ошибка=%ld мГц  "  
-                "clk_sys=%lu МГц\n",  
+static void report(void) {  
+  Serial.printf("active=%d  LO=%lu Hz  err=%ld Hz  "  
+                "clk_sys=%lu Hz\n",  
                 (int)quad_vfo_active(),  
                 (unsigned long)quad_vfo_actual_hz(),  
-                (long)quad_vfo_error_mhz(),  
-                (unsigned long)(quad_vfo_clk_sys_hz() / 1000000UL));  
+                (long)quad_vfo_error_hz(),  
+                (unsigned long)quad_vfo_clk_sys_hz());  
+  Serial.printf("PLL: refdiv=%u fbdiv=%u postdiv=%u/%u  "  
+                "VCO=%llu Hz %s\n",  
+                (unsigned)quad_vfo_pll_refdiv(),  
+                (unsigned)quad_vfo_pll_fbdiv(),  
+                (unsigned)quad_vfo_pll_p1(),  
+                (unsigned)quad_vfo_pll_p2(),  
+                (unsigned long long)quad_vfo_pll_vco_hz(),  
+                quad_vfo_pll_nominal() ? "(nominal)" : "(target)");  
 }
 
 void setup() {
@@ -36,8 +44,8 @@ void setup() {
   Serial.println("\n ==== КВАДРАТУРНЫЙ ГЕНЕРАТОР ==== ");
  
   // инициализация генератора:
-  // блок ввода-вывода PIO1, пины I = GP0, Q = GP1, SM — первая свободная
-  if (!quad_vfo_init_simple(pio1, 0)) {
+  // блок ввода-вывода PIO1, пины I = GP28, Q = GP1, SM — первая свободная
+  if (!quad_vfo_init_simple(pio1, 28)) {
     Serial.println("quad_vfo_init_simple failed (заняты SM или нет памяти программ PIO)");
     while (1) delay(1000);
   }
