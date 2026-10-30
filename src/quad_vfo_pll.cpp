@@ -115,7 +115,7 @@ static bool __not_in_flash_func(rollback_nominal)(
   restore_interrupts(ints);
 
   if (!ok) {
-    Serial.println("[QUAD] rollback: номинальный PLL без LOCK — шина на XOSC!");
+    QP_LOG("[QUAD] rollback: номинальный PLL без LOCK — шина на XOSC!");
   }
   return ok;
 }
@@ -191,7 +191,7 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
     uint32_t meas_khz =  
         frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);  
     meas_hz = meas_clk_sys_hz();  
-    Serial.printf("[PLL] attempt %d: meas=%lu Hz expect=%llu Hz\n",  
+    QP_LOG("[PLL] attempt %d: meas=%lu Hz expect=%llu Hz\n",  
                   attempt, (unsigned long)meas_hz,  
                   (unsigned long long)expect_hz);  
     if ((uint64_t)meas_hz * 1000ull > expect_hz * 997ull &&  
