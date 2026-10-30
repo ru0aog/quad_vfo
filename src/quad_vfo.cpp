@@ -499,7 +499,7 @@ bool quad_vfo_start(uint32_t freq_hz) {
                                    &s_cfg.pll_nominal, xosc_hz);  
   
   // Делитель: на успехе сохраняем выбранный сканером (проверив его по  
-  // РЕАЛЬНОЙ шине); после отката PLL пересчитываем от фактической.  
+  // РЕАЛЬНОЙ шине) 
   uint64_t clk_sys_hz = clock_get_hz(clk_sys);  
   uint32_t div_q8;  
   int64_t  f_nco;  
