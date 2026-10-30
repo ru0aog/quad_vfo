@@ -355,10 +355,11 @@ bool quad_vfo_start(uint32_t freq_hz) {
                      ? s_cfg.clk_sys_max_hz : 420000000ULL;  
   if (clk_max < s_cfg.clk_sys_min_hz) {  
     clk_max = s_cfg.pll_ceiling.clk_sys_hz;  
-    Serial.printf("[QUAD] паспорт clk_max=%lu МГц не доказан — "  
-                  "потолок из pll_ceiling=%lu МГц\n",  
-                  (unsigned long)(s_cfg.clk_sys_max_hz / 1000000UL),  
-                  (unsigned long)(clk_max / 1000000ULL));  
+    Serial.printf("[QUAD] выполнен разгон: потолок clk_sys_max_hz=%lu МГц"
+                  " (паспорт %lu МГц)\n",
+                  (unsigned long)(clk_max / 1000000ULL),
+                  (unsigned long)(s_cfg.clk_sys_max_hz / 1000000UL)
+                  );
   }  
   const uint64_t vco_max = s_cfg.pll_vco_max_hz;  
   
