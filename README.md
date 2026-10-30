@@ -1,3 +1,5 @@
+﻿[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ru0aog/quad_vfo)
+ 
 # quad_vfo — квадратурный LO на PIO для RP2040  
 *Автор: RU0AOG Stanislav · Лицензия: MIT*
 
