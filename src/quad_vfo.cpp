@@ -505,29 +505,39 @@ bool quad_vfo_start(uint32_t freq_hz) {
   int64_t  f_nco;  
   bool     is_int;  
   
-// Захват считаем подтверждённым ТОЛЬКО если set_clk_sys отрапортовал  
-  // успех (аппаратный LOCK + измерение ±0,3%) И фактическая шина  
-  // совпадает с целевой в пределах 1%. Иначе — отказ.  
-  bool locked = false;  
-  if (pll_ok && clk_sys_hz != 0) {  
+  // Захват подтверждён только отчётом set_clk_sys (аппаратный LOCK +  
+  // измерение ±0,3%). Совпадение с best.clk_sys_hz не требуем: PLL могла  
+  // захватить близкую, но другую частоту — делитель пересчитаем.  
+  if (!pll_ok || clk_sys_hz == 0) {  
+    Serial.println("[QUAD] ОШИБКА: захват PLL не подтверждён — "  
+                   "генератор не запущен");  
+    fail_path();  
+    return false;  
+  }  
+  if (clk_sys_hz != best.clk_sys_hz) {  
     uint64_t diff = (clk_sys_hz > best.clk_sys_hz)  
         ? clk_sys_hz - best.clk_sys_hz : best.clk_sys_hz - clk_sys_hz;  
-    locked = (diff <= (uint64_t)best.clk_sys_hz / 100ull);  
+    Serial.printf("[QUAD] ВНИМАНИЕ: шина %llu Hz вместо целевых %lu "  
+                  "(расхождение %llu Hz) — пересчёт делителя\n",  
+                  (unsigned long long)clk_sys_hz,  
+                  (unsigned long)best.clk_sys_hz,  
+                  (unsigned long long)diff);  
   }  
-  if (!locked) {  
-    Serial.println("[QUAD] ОШИБКА: захват PLL не подтверждён — "  
-                   "генератор не запущен, шина на номинале");  
+  
+  // Сначала пробуем делитель, выбранный сканером; если он на  
+  // фактической шине не проходит NCO-зоны — подбираем заново.  
+  if (div_nco_ok(clk_sys_hz, lo_hz, best_div_q8, &f_nco)) {  
+    div_q8 = best_div_q8;  
+    is_int = best_is_int;  
+  } else if (recompute_div(clk_sys_hz, lo_hz, &div_q8, &f_nco, &is_int)) {  
+    Serial.println("[QUAD] делитель сканера не подошёл — "  
+                   "подобран новый под фактическую шину");  
+  } else {  
+    Serial.println("[QUAD] ОШИБКА: на фактической шине ни один "  
+                   "делитель не удовлетворяет NCO-ограничениям");  
     fail_path();  
     return false;  
-  }  
-  if (!div_nco_ok(clk_sys_hz, lo_hz, best_div_q8, &f_nco)) {  
-    Serial.println("[QUAD] ОШИБКА: выбранный делитель не проходит "  
-                   "NCO-ограничения на фактической шине");  
-    fail_path();  
-    return false;  
-  }  
-  div_q8 = best_div_q8;  
-  is_int = best_is_int;
+  }
 
   {  
     uint64_t lo_got = (clk_sys_hz * 256ull) / (4ull * (uint64_t)div_q8);  
@@ -602,7 +612,8 @@ void quad_vfo_debug(void) {
                 (unsigned long)s_cfg.pio->ctrl,  
                 (int)((s_cfg.pio->ctrl & (1u << s_sm)) != 0),  
                 (unsigned long)s_cfg.pio->sm[s_sm].execctrl);  
-  Serial.printf("[LODBG] lo_hz=%lu  err=%ld мГц  active=%d\n",  
-                (unsigned long)s_lo_actual_hz, (long)s_lo_error_hz,  
-                (int)s_active);  
+  Serial.printf("[LODBG] lo_hz=%lu err=%ld Hz active=%d\n",
+                (unsigned long)s_lo_actual_hz,
+                (long)s_lo_error_hz,
+                (int)s_active);
 }
