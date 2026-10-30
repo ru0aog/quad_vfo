@@ -298,42 +298,80 @@ static bool div_nco_ok(uint64_t clk_sys_hz, uint32_t lo_hz,
 // Пересчёт делителя от реальной clk_sys и проверка NCO-ограничений.  
 // Используется и на основном пути, и после отката PLL.  
 // Возвращает false, если ни один делитель не удовлетворяет ограничениям.  
+// Полный поиск по допустимому интервалу Q8-делителя.  
+// lo_got = clk*64/q монотонно убывает по q, f_nco монотонно растёт —  
+// допустимые q образуют один непрерывный интервал, границы которого  
+// вычисляются из NCO-ограничений аналитически.  
 static bool recompute_div(uint64_t clk_sys_hz, uint32_t lo_hz,  
                           uint32_t *out_div_q8, int64_t *out_f_nco,  
                           bool *out_is_int) {  
-  uint32_t div_q8;  
-  {  
-    uint64_t D = (clk_sys_hz + 2ull * lo_hz) / (4ull * lo_hz);  
-    if (D < 2)      D = 2;  
-    if (D > 0xFFFF) D = 0xFFFF;  
-    div_q8 = (uint32_t)(D << 8);  
-  }  
-  uint32_t div_frac;  
-  {  
-    uint64_t q = (clk_sys_hz * 256ull + 2ull * lo_hz) / (4ull * lo_hz);  
-    if (q < (2u << 8))      q = 2u << 8;  
-    if (q > (0xFFFFu << 8)) q = 0xFFFFu << 8;  
-    div_frac = (uint32_t)q;  
-  }  
+  if (clk_sys_hz == 0 || lo_hz == 0) return false;  
   
-  uint32_t best_div = 0, div_int = div_q8;  
-  int64_t  best_abs = INT64_MAX, best_nco = 0;  
-  bool     best_int = true;  
+  const uint64_t q_min_hw = 2ull << 8;        // делитель >= 2.0  
+  const uint64_t q_max_hw = 0xFFFFull << 8;   // поле 16.8  
+  uint64_t q_lo, q_hi;  
   
-  for (int k = 0; k < 2; k++) {  
-    uint32_t dq = (k == 0) ? div_int : div_frac;  
+  if (s_cfg.nco_max_hz != 0) {  
+    // Приёмник: f_nco = (lo_hz+if_shift) - lo_got ∈ (0, nco_max),  
+    // т.е. lo_got ∈ (lo_t - nco_max, lo_t).  
+    const uint64_t lo_t   = (uint64_t)lo_hz + s_cfg.if_shift_hz;  
+    const uint64_t got_hi = lo_t;                                  // f_nco→0+  
+    const uint64_t got_lo = (lo_t > s_cfg.nco_max_hz)  
+                            ? lo_t - s_cfg.nco_max_hz : 1ull;      // f_nco→nco_max  
+    // lo_got < got_hi  ⇒  q > clk*64/got_hi  
+    q_lo = (clk_sys_hz * 64ull) / got_hi + 1ull;  
+    // lo_got > got_lo  ⇒  q < clk*64/got_lo  (потолок включительно)  
+    q_hi = (clk_sys_hz * 64ull + got_lo - 1ull) / got_lo;  
+  } else {  
+    // Точный режим: div_nco_ok пропускает только ±tol вокруг lo_hz,  
+    // что соответствует ±~1 единице q — сканируем малым окном.  
+    uint64_t q0 = (clk_sys_hz * 256ull + 2ull * lo_hz) / (4ull * lo_hz);  
+    q_lo = (q0 > q_min_hw + 4) ? q0 - 4 : q_min_hw;  
+    q_hi = q0 + 4;  
+  }  
+  // Запас ±2 на ошибки округления границ.  
+  q_lo = (q_lo > q_min_hw + 2) ? q_lo - 2 : q_min_hw;  
+  q_hi += 2;  
+  if (q_hi > q_max_hw) q_hi = q_max_hw;  
+  if (q_lo > q_hi) return false;  
+  
+  uint64_t best_cost = UINT64_MAX;  
+  uint32_t best_div  = 0;  
+  int64_t  best_nco  = 0;  
+  bool     best_int  = true;  
+  
+  for (uint64_t q = q_lo; q <= q_hi; q++) {  
+    uint32_t dq = (uint32_t)q;  
     int64_t f_nco;  
     if (!div_nco_ok(clk_sys_hz, lo_hz, dq, &f_nco)) continue;  
-    int64_t a = (f_nco < 0) ? -f_nco : f_nco;  
-    if (a < best_abs) { best_abs = a; best_div = dq; best_nco = f_nco;  
-                        best_int = (k == 0); }  
+  
+    // Критерий: близость к sweet-зоне (как у сканера); в точном  
+    // режиме и вне зоны — минимум |f_nco|. Тай-брейк — целый делитель.  
+    uint64_t cost;  
+    if (s_cfg.nco_max_hz != 0) {  
+      if      (f_nco < (int64_t)s_cfg.nco_sweet_lo)  
+        cost = (uint64_t)((int64_t)s_cfg.nco_sweet_lo - f_nco);  
+      else if (f_nco > (int64_t)s_cfg.nco_sweet_hi)  
+        cost = (uint64_t)(f_nco - (int64_t)s_cfg.nco_sweet_hi);  
+      else  
+        cost = 0;  
+    } else {  
+      cost = (uint64_t)(f_nco < 0 ? -f_nco : f_nco);  
+    }  
+    bool is_int = ((dq & 0xFFu) == 0);  
+    if (cost < best_cost ||  
+        (cost == best_cost && is_int && !best_int)) {  
+      best_cost = cost; best_div = dq; best_nco = f_nco;  
+      best_int  = is_int;  
+    }  
+    if (cost == 0 && is_int) break;  // дальше не лучше  
   }  
   if (best_div == 0) return false;  
   *out_div_q8 = best_div;  
   *out_f_nco  = best_nco;  
   *out_is_int = best_int;  
   return true;  
-}  
+}
   
 // ---------------------------------------------------------------------------  
 bool quad_vfo_start(uint32_t freq_hz) {  
@@ -499,7 +537,7 @@ bool quad_vfo_start(uint32_t freq_hz) {
                                    &s_cfg.pll_nominal, xosc_hz);  
   
   // Делитель: на успехе сохраняем выбранный сканером (проверив его по  
-  // РЕАЛЬНОЙ шине) 
+  // РЕАЛЬНОЙ шине); после отката PLL пересчитываем от фактической.  
   uint64_t clk_sys_hz = clock_get_hz(clk_sys);  
   uint32_t div_q8;  
   int64_t  f_nco;  
