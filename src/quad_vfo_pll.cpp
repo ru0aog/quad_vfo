@@ -27,6 +27,14 @@ static uint32_t s_clk_sys_hz = 133000000;
 
 uint32_t quad_vfo_clk_sys_hz(void) { return s_clk_sys_hz; }
 
+// Измерение clk_sys через SDK-функцию: разрешение 1 кГц.  
+static uint32_t __not_in_flash_func(meas_clk_sys_hz)(void) {  
+  return frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS) * 1000u;  
+}
+  
+// Публичный вариант для debug-вывода (клапан обычный, без flash-атрибута).  
+uint32_t quad_vfo_clk_sys_meas_hz(void) { return meas_clk_sys_hz(); }
+
 uint32_t quad_vfo_vsel_for(uint64_t clk_hz) {
   if (clk_hz >= 250000000ULL)      return VREG_VOLTAGE_1_30;
   else if (clk_hz >= 200000000ULL) return VREG_VOLTAGE_1_25;
@@ -167,17 +175,24 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
   clk_sys_to_pll(target_clk_hz);
   restore_interrupts(ints_status);
 
-  bool     locked_ok  = false;
-  uint32_t meas_khz   = 0;
-  uint32_t expect_khz = cfg.clk_sys_hz / 1000u;
-
-  for (int attempt = 0; attempt < 3; attempt++) {
-    busy_wait_us(300);
-    meas_khz = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);
-    if (meas_khz > expect_khz * 997u / 1000u &&
-        meas_khz < expect_khz * 1003u / 1000u) {
-      locked_ok = true;
-      break;
+  bool     locked_ok = false;  
+  uint32_t meas_hz   = 0;  
+  // Верификация в герцах: expect*1003 в u64 — u32 переполнится  
+  // уже при ~4,2 МГц. Окно ±0,3% прежнее.  
+  const uint64_t expect_hz = cfg.clk_sys_hz;  
+  
+  for (int attempt = 0; attempt < 3; attempt++) {  
+  busy_wait_us(300);  
+    uint32_t meas_khz =  
+        frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);  
+    meas_hz = meas_clk_sys_hz();  
+    Serial.printf("[PLL] attempt %d: meas=%lu Hz expect=%llu Hz\n",  
+                  attempt, (unsigned long)meas_hz,  
+                  (unsigned long long)expect_hz);  
+    if ((uint64_t)meas_hz * 1000ull > expect_hz * 997ull &&  
+        (uint64_t)meas_hz * 1000ull < expect_hz * 1003ull) {
+      locked_ok = true;  
+      break;  
     }
 
     uint32_t ints2 = save_and_disable_interrupts();
@@ -204,6 +219,6 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
     busy_wait_us(100);
     vreg_set_voltage((vreg_voltage)vsel);
   }
-  s_clk_sys_hz = meas_khz * 1000u;
+  s_clk_sys_hz = meas_hz;              // измеренная реальность, Гц  
   return true;
 }

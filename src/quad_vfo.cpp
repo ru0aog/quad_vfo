@@ -53,6 +53,13 @@ static bool     s_sm_claimed = false;
 static bool     s_active     = false;
 static uint32_t s_lo_actual_hz = 0;
 static int32_t  s_lo_error_hz = 0;
+  
+// Фактически применённый профиль PLL из последнего успешного старта
+static uint16_t s_pll_refdiv = 0;  
+static uint16_t s_pll_fbdiv  = 0;  
+static uint8_t  s_pll_p1     = 0;  
+static uint8_t  s_pll_p2     = 0;  
+static bool     s_pll_nominal_used = false;
 
 static int      s_offset[2]    = { -1, -1 };
 static unsigned s_cur_offset   = 0;
@@ -90,6 +97,9 @@ static void fail_path(void) {
   s_active = false;
   s_lo_actual_hz = 0;
   s_lo_error_hz = 0;
+  s_pll_refdiv = s_pll_fbdiv = 0;  
+  s_pll_p1 = s_pll_p2 = 0;  
+  s_pll_nominal_used = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,8 +148,10 @@ bool quad_vfo_init(const quad_vfo_cfg_t *cfg) {
     return false;
   if (cfg->nco_max_hz == 0 && cfg->if_shift_hz != 0) return false;
 
-  if (cfg->pll_vco_max_hz == 0 ||
-      cfg->pll_vco_max_hz > QUAD_VCO_HW_MAX_HZ) return false;
+  // Пользовательский потолок VCO — только sanity-границы. Выше  
+  // даташитных 1600 МГц не запрещаем: захват и частота всё равно  
+  // подтверждаются LOCK + измерением в quad_vfo_set_clk_sys().  
+  if (cfg->pll_vco_max_hz < QUAD_VCO_HW_MIN_HZ) return false;
   if (!pll_profile_ok(&cfg->pll_nominal, cfg->xosc_hz)) return false;
   if (!pll_profile_ok(&cfg->pll_ceiling, cfg->xosc_hz)) return false;
   if (!pll_profile_consistent(&cfg->pll_nominal, cfg->xosc_hz)) return false;
@@ -434,7 +446,7 @@ bool quad_vfo_start(uint32_t freq_hz) {
   if (vsel == 0 || vsel < (uint32_t)VREG_VOLTAGE_1_10)
     vsel = quad_vfo_vsel_for(best.clk_sys_hz);
 
-  // Изменение: отличаем успешный целевой PLL от успешного rollback.
+  // Три исхода: цель подтверждена / номинал восстановлен / отказ
   bool nominal_ok = false;
   bool pll_ok = quad_vfo_set_clk_sys(&best, vsel,
                                      &s_cfg.pll_nominal, xosc_hz,
@@ -481,23 +493,42 @@ bool quad_vfo_start(uint32_t freq_hz) {
     return false;
   }
 
+  // Фиксируем применённый профиль PLL для обратного вывода.  
+  {  
+    const quad_vfo_pll_t *applied = pll_ok ? &best : &s_cfg.pll_nominal;  
+    s_pll_refdiv = (uint16_t)applied->refdiv;  
+    s_pll_fbdiv  = (uint16_t)applied->fbdiv;  
+    s_pll_p1     = (uint8_t)applied->p1;  
+    s_pll_p2     = (uint8_t)applied->p2;  
+    s_pll_nominal_used = !pll_ok;  
+  }  
+  
   {
     uint64_t lo_got = (clk_sys_hz * 256ull) / (4ull * (uint64_t)div_q8);
     s_lo_actual_hz = (uint32_t)lo_got;
     s_lo_error_hz = (int32_t)((int64_t)lo_hz - (int64_t)lo_got);
   }
-  {
-    bool sweet = (s_cfg.nco_max_hz != 0 &&
-                  f_nco >= (int64_t)s_cfg.nco_sweet_lo &&
-                  f_nco <= (int64_t)s_cfg.nco_sweet_hi);
-    Serial.printf("[QUAD] clk_sys=%llu Hz  clkdiv Q8=0x%lX (%s)  "
-                  "LO=%lu Hz  err=%ld Hz  f_nco=%ld sweet=%d\n",
-                  (unsigned long long)clk_sys_hz,
-                  (unsigned long)div_q8,
-                  is_int ? "целый" : "дробный",
-                  (unsigned long)s_lo_actual_hz,
-                  (long)s_lo_error_hz,
-                  (long)f_nco, sweet ? 1 : 0);
+  
+  {  
+    bool sweet = (s_cfg.nco_max_hz != 0 &&  
+                  f_nco >= (int64_t)s_cfg.nco_sweet_lo &&  
+                  f_nco <= (int64_t)s_cfg.nco_sweet_hi);  
+    uint64_t vco_hz = (s_pll_refdiv)  
+        ? (xosc_hz / s_pll_refdiv) * s_pll_fbdiv : 0;  
+    Serial.printf("[QUAD] clk_sys=%llu Hz  PLL refdiv=%u fbdiv=%u "  
+                  "p1=%u p2=%u VCO=%llu Hz%s  "  
+                  "clkdiv Q8=0x%lX (%s)  LO=%lu Hz  err=%ld Hz  "  
+                  "f_nco=%ld sweet=%d\n",  
+                  (unsigned long long)clk_sys_hz,  
+                  (unsigned)s_pll_refdiv, (unsigned)s_pll_fbdiv,  
+                  (unsigned)s_pll_p1, (unsigned)s_pll_p2,  
+                  (unsigned long long)vco_hz,  
+                  s_pll_nominal_used ? " (nominal)" : "",  
+                  (unsigned long)div_q8,  
+                  is_int ? "целый" : "дробный",  
+                  (unsigned long)s_lo_actual_hz,  
+                  (long)s_lo_error_hz,  
+                  (long)f_nco, sweet ? 1 : 0);  
   }
 
   // === Конфигурация SM под квадратуру ===
@@ -523,9 +554,12 @@ void quad_vfo_stop(void) {
   pio_sm_set_consecutive_pindirs(s_cfg.pio, s_sm, s_cfg.pin_i, 2, false);
   gpio_set_dir(s_cfg.pin_i, GPIO_IN);
   gpio_set_dir(s_cfg.pin_i + 1, GPIO_IN);
-  s_active = false;
-  s_lo_actual_hz = 0;
-  s_lo_error_hz = 0;
+  s_active = false;  
+  s_lo_actual_hz = 0;  
+  s_lo_error_hz = 0;  
+  s_pll_refdiv = s_pll_fbdiv = 0;  
+  s_pll_p1 = s_pll_p2 = 0;  
+  s_pll_nominal_used = false;  
 }
 
 uint32_t quad_vfo_actual_hz(void) { return s_lo_actual_hz; }
@@ -538,13 +572,14 @@ void quad_vfo_debug(void) {
     Serial.println("[LODBG] не инициализирован");
     return;
   }
-  uint32_t meas_clk =
-      frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS) * 1000u;
-  uint32_t cdiv = s_cfg.pio->sm[s_sm].clkdiv;
-
-  Serial.printf("[LODBG] clk_sys: cached=%lu kHz  measured=%lu kHz\n",
-                (unsigned long)(clock_get_hz(clk_sys) / 1000ULL),
-                (unsigned long)(meas_clk / 1000u));
+  uint32_t meas_clk = quad_vfo_clk_sys_meas_hz();  
+  uint32_t cdiv = s_cfg.pio->sm[s_sm].clkdiv;  
+  
+  Serial.printf("[LODBG] clk_sys: cached=%lu Hz  measured=%lu Hz "  
+                "(delta=%ld Hz)\n",  
+                (unsigned long)clock_get_hz(clk_sys),  
+                (unsigned long)meas_clk,  
+                (long)((int64_t)meas_clk - (int64_t)clock_get_hz(clk_sys)));
   Serial.printf("[LODBG] PIO=%d SM=%d offset=%u  clkdiv=0x%08lX "
                 "(int=%lu frac=%lu)\n",
                 pio_get_index(s_cfg.pio), (int)s_sm, s_cur_offset,
@@ -559,4 +594,12 @@ void quad_vfo_debug(void) {
                 (unsigned long)s_lo_actual_hz,
                 (long)s_lo_error_hz,
                 (int)s_active);
+  uint64_t vco_hz = (s_pll_refdiv)  
+      ? (s_cfg.xosc_hz / s_pll_refdiv) * s_pll_fbdiv : 0;  
+  Serial.printf("[LODBG] PLL: refdiv=%u fbdiv=%u postdiv=%u/%u "  
+                "VCO=%llu Hz %s\n",  
+                (unsigned)s_pll_refdiv, (unsigned)s_pll_fbdiv,  
+                (unsigned)s_pll_p1, (unsigned)s_pll_p2,  
+                (unsigned long long)vco_hz,  
+                s_pll_nominal_used ? "(nominal fallback)" : "(target)");
 }

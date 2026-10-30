@@ -43,3 +43,6 @@ bool quad_vfo_set_clk_sys(const quad_vfo_pll_t *cfg, uint32_t vsel,
 // Частота шины по последней подтверждённой настройке (или XOSC
 // после неудачного отката).
 uint32_t quad_vfo_clk_sys_hz(void);
+
+// Измеренная аппаратно частота clk_sys, Гц (точность ~сотни Гц).  
+uint32_t quad_vfo_clk_sys_meas_hz(void);
